@@ -1,0 +1,96 @@
+name: Validate Components
+
+on:
+  pull_request:
+    paths:
+      - "packages/**"
+
+jobs:
+  validate-components:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find changed components
+        id: components
+        shell: bash
+        run: |
+          git diff --name-only \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            -- 'packages/**' \
+            > changed-files.txt
+
+          echo "Files changed by this PR:"
+          cat changed-files.txt
+
+          components=$(
+            awk -F/ '
+              NF >= 3 && $1 == "packages" {
+                print $1 "/" $2 "/" $3
+              }
+            ' changed-files.txt | sort -u
+          )
+
+          echo ""
+          echo "Components changed by this PR:"
+          echo "$components"
+
+          {
+            echo "components<<EOF"
+            echo "$components"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate changed components
+        shell: bash
+        run: |
+          set -e
+
+          while IFS= read -r component; do
+            [ -z "$component" ] && continue
+
+            echo ""
+            echo "================================"
+            echo "Validating: $component"
+            echo "================================"
+
+            # Make sure the path has exactly:
+            # packages/username/component
+            if [[ ! "$component" =~ ^packages/[^/]+/[^/]+$ ]]; then
+              echo "::error::$component is not a valid component path"
+              exit 1
+            fi
+
+            # Required files
+            required_files=(
+              "component.json"
+              "README.md"
+              "index.js"
+            )
+
+            for file in "${required_files[@]}"; do
+              if [ ! -f "$component/$file" ]; then
+                echo "::error::$component is missing required file: $file"
+                exit 1
+              fi
+            done
+
+            # Validate JSON
+            node -e "
+              const fs = require('fs');
+              JSON.parse(
+                fs.readFileSync('$component/component.json', 'utf8')
+              );
+            " || {
+              echo "::error::$component/component.json contains invalid JSON"
+              exit 1
+            }
+
+            echo "✓ $component passed validation"
+
+          done <<< "${{ steps.components.outputs.components }}"
